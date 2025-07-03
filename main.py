@@ -1,298 +1,193 @@
+import os
 import time
 import random
-import requests
-from bs4 import BeautifulSoup
-import re
-import json
 import threading
-from urllib.parse import urljoin, urlparse
 import logging
-from fake_useragent import UserAgent
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+from PIL import Image
+import imagehash
+from io import BytesIO
+import requests
 
 # إعدادات التسجيل
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ad_automation.log'),
+        logging.FileHandler("automation_farm.log"),
         logging.StreamHandler()
     ]
 )
 
-class ServerAdAutomation:
-    def __init__(self):
-        self.revenue = 0.0
-        self.session_revenue_target = 0.5
-        self.running = True
-        self.session = requests.Session()
-        self.ua = UserAgent()
-        self.close_keywords = ["close", "exit", "dismiss", "x", "✕", "✖", "❌", "關閉", "关闭", "閉じる", "اغلاق"]
-        self.ad_click_patterns = [
-            r'ad\d+', 'ad_', 'banner', 'adsbox', 'ad-unit', 'ad_container', 'ad-wrapper',
-            'ad-slot', 'adlink', 'adtext', 'advert', 'sponsor', 'promo', 'advertisement'
-        ]
-        self.visited_urls = set()
-        
-    def get_random_headers(self):
-        """إنشاء رؤوس HTTP عشوائية لمحاكاة متصفحات مختلفة"""
-        return {
-            'User-Agent': self.ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'max-age=0'
-        }
-    
-    def rotate_user_agent(self):
-        """تغيير وكيل المستخدم بشكل عشوائي"""
-        self.session.headers.update({'User-Agent': self.ua.random})
-    
-    def is_ad_element(self, element):
-        """فحص ما إذا كان العنصر هو إعلان"""
-        # فحص من خلال السمات الشائعة للإعلانات
-        attrs = element.attrs
-        classes = ' '.join(attrs.get('class', [])).lower()
-        id_ = attrs.get('id', '').lower()
-        
-        # البحث عن أنماط معروفة في الإعلانات
-        for pattern in self.ad_click_patterns:
-            if re.search(pattern, classes) or re.search(pattern, id_):
-                return True
-        
-        # فحص الروابط الشائعة للإعلانات
-        if element.name == 'a':
-            href = attrs.get('href', '').lower()
-            ad_domains = ['doubleclick.net', 'googleadservices.com', 'ad.doubleclick.net']
-            if any(domain in href for domain in ad_domains):
-                return True
-                
-        return False
-    
-    def is_close_element(self, element):
-        """فحص ما إذا كان العنصر هو زر إغلاق"""
-        # فحص النص الظاهر
-        text = element.get_text().strip().lower()
-        if any(keyword in text for keyword in self.close_keywords):
-            return True
-            
-        # فحص خاصية aria-label
-        aria_label = element.attrs.get('aria-label', '').lower()
-        if any(keyword in aria_label for keyword in self.close_keywords):
-            return True
-            
-        # فحص الأصناف (classes)
-        classes = ' '.join(element.attrs.get('class', [])).lower()
-        if any(keyword in classes for keyword in self.close_keywords):
-            return True
-            
-        # فحص الصور (أيقونات الإغلاق)
-        if element.name == 'img':
-            src = element.attrs.get('src', '').lower()
-            alt = element.attrs.get('alt', '').lower()
-            if any(keyword in alt for keyword in self.close_keywords) or any(keyword in src for keyword in self.close_keywords):
-                return True
-                
-        return False
-    
-    def find_and_simulate_close(self, soup, base_url):
-        """البحث عن أزرار الإغلاق ومحاكاة النقر عليها"""
-        potential_close_buttons = soup.find_all(['button', 'div', 'a', 'span', 'img'])
-        close_buttons = [btn for btn in potential_close_buttons if self.is_close_element(btn)]
-        
-        if close_buttons:
-            close_button = random.choice(close_buttons)
-            logging.info("تم العثور على زر إغلاق")
-            
-            # محاكاة النقر عن طريق زيارة الرابط إذا كان موجودًا
-            if close_button.name == 'a' and 'href' in close_button.attrs:
-                close_url = close_button.attrs['href']
-                if not close_url.startswith('http'):
-                    close_url = urljoin(base_url, close_url)
-                
-                try:
-                    response = self.session.get(close_url, timeout=10)
-                    if response.status_code == 200:
-                        logging.info("تمت محاكاة إغلاق الإعلان بنجاح")
-                        self.revenue += random.uniform(0.01, 0.03)
-                        return True
-                except Exception as e:
-                    logging.error(f"خطأ في محاكاة الإغلاق: {str(e)}")
-        
-        return False
-    
-    def find_and_click_ad(self, soup, base_url):
-        """البحث عن إعلان ومحاكاة النقر عليه"""
-        ads = soup.find_all(['div', 'a', 'iframe', 'ins'])
-        ads = [ad for ad in ads if self.is_ad_element(ad)]
-        
-        if not ads:
-            logging.info("لم يتم العثور على إعلانات")
-            return False
-            
-        ad = random.choice(ads)
-        logging.info("تم اختيار إعلان للنقر")
-        
-        # استخراج رابط النقر إذا كان متاحًا
-        ad_link = None
-        if ad.name == 'a' and 'href' in ad.attrs:
-            ad_link = ad.attrs['href']
-        elif ad.name == 'iframe' and 'src' in ad.attrs:
-            ad_link = ad.attrs['src']
-        elif 'data-href' in ad.attrs:
-            ad_link = ad.attrs['data-href']
-        elif 'onclick' in ad.attrs:
-            # محاولة استخراج الرابط من حدث onclick
-            onclick_js = ad.attrs['onclick']
-            match = re.search(r'window\.open\(\s*[\'"](.+?)[\'"]\s*\)', onclick_js)
-            if match:
-                ad_link = match.group(1)
-        
-        if ad_link:
-            if not ad_link.startswith('http'):
-                ad_link = urljoin(base_url, ad_link)
-                
-            try:
-                # محاكاة النقر بزيارة الرابط
-                response = self.session.get(ad_link, timeout=15)
-                if response.status_code == 200:
-                    logging.info("تمت محاكاة النقر على الإعلان")
-                    self.revenue += random.uniform(0.02, 0.05)
-                    
-                    # محاكاة وقت مشاهدة الإعلان
-                    watch_time = random.uniform(8, 15)
-                    logging.info(f"محاكاة مشاهدة الإعلان لمدة {watch_time:.1f} ثانية")
-                    time.sleep(watch_time)
-                    return True
-            except Exception as e:
-                logging.error(f"خطأ في محاكاة النقر على الإعلان: {str(e)}")
-        
-        return False
-    
-    def get_internal_links(self, soup, base_url):
-        """الحصول على الروابط الداخلية من الصفحة"""
-        internal_links = []
-        domain = urlparse(base_url).netloc
-        
-        for link in soup.find_all('a', href=True):
-            href = link.attrs['href']
-            
-            # تجاهل الروابط الفارغة
-            if not href or href.startswith('javascript:') or href.startswith('mailto:'):
-                continue
-                
-            # تحويل الرابط إلى مطلق
-            if not href.startswith('http'):
-                href = urljoin(base_url, href)
-                
-            # التحقق من أن الرابط ينتمي لنفس النطاق
-            if urlparse(href).netloc == domain and href not in self.visited_urls:
-                internal_links.append(href)
-                
-        return internal_links
-    
-    def browse_page(self, url):
-        """تصفح صفحة واحدة والتفاعل معها"""
-        try:
-            # تغيير وكيل المستخدم بشكل دوري
-            if random.random() < 0.3:
-                self.rotate_user_agent()
-                
-            # إضافة الصفحة إلى المواقع المزورة
-            self.visited_urls.add(url)
-            
-            # طلب الصفحة
-            response = self.session.get(url, headers=self.get_random_headers(), timeout=15)
-            
-            if response.status_code != 200:
-                logging.warning(f"فشل في تحميل الصفحة: {response.status_code}")
-                return False
-                
-            logging.info(f"تم تحميل الصفحة: {url}")
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # محاولة إغلاق الإعلانات المنبثقة
-            self.find_and_simulate_close(soup, url)
-            
-            # محاولة النقر على إعلان
-            self.find_and_click_ad(soup, url)
-            
-            # الحصول على الروابط الداخلية
-            internal_links = self.get_internal_links(soup, url)
-            
-            # زيارة رابط داخلي عشوائي (40% احتمال)
-            if internal_links and random.random() < 0.4:
-                next_url = random.choice(internal_links)
-                logging.info(f"زيارة الصفحة الداخلية: {next_url}")
-                time.sleep(random.uniform(2, 5))  # انتظار قبل التصفح
-                self.browse_page(next_url)
-            
-            return True
-            
-        except Exception as e:
-            logging.error(f"خطأ في تصفح الصفحة: {str(e)}")
-            return False
-    
-    def start_session(self, start_url):
-        """بدء جلسة تصفح جديدة"""
-        logging.info(f"بدء جلسة تصفح جديدة من: {start_url}")
-        self.browse_page(start_url)
-        
-        # محاكاة وقت الجلسة
-        session_duration = random.uniform(120, 300)  # 2-5 دقائق
-        logging.info(f"مدة الجلسة: {session_duration:.1f} ثانية")
-        time.sleep(session_duration)
-        
-        # إعادة تعيين جلسة HTTP
-        self.session = requests.Session()
-        self.visited_urls = set()
-    
-    def run(self, website_url, duration_hours=1):
-        """تشغيل النظام لمدة محددة"""
-        start_time = time.time()
-        end_time = start_time + (duration_hours * 3600)
-        session_count = 0
-        
-        while time.time() < end_time and self.running:
-            session_count += 1
-            logging.info(f"\nبدء الجلسة #{session_count}")
-            
-            # بدء جلسة تصفح
-            self.start_session(website_url)
-            
-            # تقييم الأداء
-            elapsed_hours = (time.time() - start_time) / 3600
-            revenue_per_hour = self.revenue / elapsed_hours if elapsed_hours > 0 else 0
-            
-            logging.info(f"\nتقييم الأداء بعد {elapsed_hours:.2f} ساعات:")
-            logging.info(f"- الإيراد الكلي: ${self.revenue:.2f}")
-            logging.info(f"- معدل الإيراد/الساعة: ${revenue_per_hour:.2f}")
-            
-            # تعديل الاستراتيجية بناءً على الأداء
-            if revenue_per_hour < 0.4:
-                logging.info("زيادة وتيرة التفاعل مع الإعلانات...")
-            elif revenue_per_hour > 0.6:
-                logging.info("تقليل وتيرة التفاعل لتجنب الكشف...")
-            
-            # فترات راحة بين الجلسات (1-5 دقائق)
-            break_time = random.randint(60, 300)
-            logging.info(f"استراحة لمدة {break_time//60} دقائق و {break_time%60} ثانية")
-            time.sleep(break_time)
-        
-        logging.info(f"\nانتهت الجلسة. الإيراد الكلي: ${self.revenue:.2f}")
+# إعدادات المزرعة
+NUM_BROWSERS = 5  # عدد المتصفحات (أجهزة)
+SESSION_DURATION = 8 * 3600  # 8 ساعات لكل جلسة
+AD_CLICK_DELAY = (3, 7)  # تأخير عشوائي قبل النقر على الإعلان
+POPUNDER_CHANCE = 0.2  # فرصة تفعيل إعلان منبثق عند الخروج (20%)
 
-# كيفية التشغيل
-if __name__ == "__main__":
-    # تكوين النظام
-    WEBSITE_URL = "https://tpmscool.web.app"
+def human_like_mouse(driver, element=None):
+    """محاكاة حركة ماوس بشرية نحو عنصر أو في الصفحة"""
+    actions = ActionChains(driver)
     
-    # إنشاء وتشغيل النظام
-    automation_system = ServerAdAutomation()
+    # حركة عشوائية في الصفحة
+    if element is None:
+        width, height = driver.execute_script("return [window.innerWidth, window.innerHeight];")
+        for _ in range(random.randint(2, 5)):
+            x = random.randint(0, width - 100)
+            y = random.randint(0, height - 100)
+            actions.move_by_offset(x, y)
+            actions.pause(random.uniform(0.1, 0.5))
+        actions.perform()
+        return
+    
+    # حركة نحو العنصر
+    location = element.location_once_scrolled_into_view
+    size = element.size
+    # التحرك إلى موقع قريب من العنصر
+    actions.move_by_offset(
+        location['x'] + random.randint(0, size['width']),
+        location['y'] + random.randint(0, size['height'])
+    )
+    # حركات صغيرة عشوائية حول العنصر
+    for _ in range(random.randint(2, 4)):
+        actions.move_by_offset(
+            random.randint(-20, 20),
+            random.randint(-20, 20)
+        ).pause(random.uniform(0.1, 0.3))
+    actions.click()
+    actions.perform()
+
+def handle_ads(driver):
+    """إدارة الإعلانات التفاعلية في الصفحة"""
+    try:
+        # نقر إعلانات Google (إذا وجدت)
+        ad_frames = driver.find_elements(By.CSS_SELECTOR, "iframe[id^='google_ads_frame']")
+        for frame in ad_frames:
+            try:
+                driver.switch_to.frame(frame)
+                ad_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'http') and not(contains(@href, 'google'))]")
+                if ad_links:
+                    ad_link = random.choice(ad_links)
+                    human_like_mouse(driver, ad_link)
+                    time.sleep(random.uniform(*AD_CLICK_DELAY))
+                    # افتح الإعلان في تبويب جديد
+                    driver.execute_script("window.open(arguments[0]);", ad_link.get_attribute('href'))
+                    # عد إلى الصفحة الأصلية
+                    driver.switch_to.window(driver.window_handles[0])
+                    # انتظر قليلاً ثم أغلق التبويب الجديد بعد فترة
+                    time.sleep(random.uniform(10, 20))
+                    if len(driver.window_handles) > 1:
+                        driver.switch_to.window(driver.window_handles[1])
+                        driver.close()
+                        driver.switch_to.window(driver.window_handles[0])
+                driver.switch_to.default_content()
+            except Exception as e:
+                logging.warning(f"خطأ في معالجة إعلان جوجل: {str(e)}")
+                driver.switch_to.default_content()
+
+        # التعامل مع الإعلانات البينية
+        interstitial = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "interstitial-ad"))
+        if interstitial.is_displayed():
+            close_btn = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.CLASS_NAME, "interstitial-close"))
+            time.sleep(random.uniform(5, 15))  # مشاهدة الإعلان
+            human_like_mouse(driver, close_btn)
+            logging.info("تم إغلاق إعلان بيني")
+    except TimeoutException:
+        pass  # لا يوجد إعلانات بينية ظاهرة
+
+def automation_session(session_id):
+    """جلسة أتمتة لمتصفح واحد"""
+    options = webdriver.ChromeOptions()
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--mute-audio")
+    
+    # إعدادات أخرى لتقليل استخدام الموارد وتجنب الكشف
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    
+    driver = webdriver.Chrome(options=options)
+    driver.set_window_size(random.randint(1024, 1366), random.randint(768, 1024))
+    driver.get("https://tpmscool.web.app/")  # URL الموقع
     
     try:
-        # تشغيل لمدة ساعة واحدة
-        automation_system.run(WEBSITE_URL, duration_hours=1)
-    except KeyboardInterrupt:
-        logging.info("تم إيقاف النظام بواسطة المستخدم")
+        # بدء التشغيل بالنقر على زر البدء
+        start_button = WebDriverWait(driver, 20).until(
+            EC.element_to_be_clickable((By.ID, "start-btn"))
+        )
+        human_like_mouse(driver, start_button)
+        logging.info(f"الجلسة {session_id}: بدأت التشغيل")
+
+        # ضبط الإعدادات لتحقيق أقصى ربح
+        driver.execute_script("document.getElementById('device-slider').value = 10;")
+        driver.execute_script("document.getElementById('speed-slider').value = 8;")
+        save_settings = driver.find_element(By.ID, "save-settings")
+        human_like_mouse(driver, save_settings)
+        logging.info(f"الجلسة {session_id}: تم ضبط الإعدادات")
+
+        start_time = time.time()
+        last_interstitial = time.time()
+        interstitial_interval = random.randint(180, 300)  # كل 3-5 دقائق
+        
+        while time.time() - start_time < SESSION_DURATION:
+            # محاكاة السلوك البشري: حركة ماوس عشوائية
+            human_like_mouse(driver)
+            
+            # إدارة الإعلانات
+            handle_ads(driver)
+            
+            # تفعيل Popunder (عند الخروج) بشكل عشوائي
+            if random.random() < POPUNDER_CHANCE:
+                try:
+                    popunder_btn = driver.find_element(By.ID, "show-popunder-btn")
+                    human_like_mouse(driver, popunder_btn)
+                    logging.info(f"الجلسة {session_id}: تم تفعيل إعلان منبثق")
+                    # بعد تفعيل المنبثق، انتظر ثم أغلقه إذا ظهر
+                    time.sleep(5)
+                    handles = driver.window_handles
+                    if len(handles) > 1:
+                        driver.switch_to.window(handles[1])
+                        driver.close()
+                        driver.switch_to.window(handles[0])
+                except Exception as e:
+                    logging.warning(f"الجلسة {session_id}: فشل تفعيل المنبثق: {str(e)}")
+            
+            # فترات راحة عشوائية بين الإجراءات
+            time.sleep(random.randint(15, 45))
+            
+            # كل فترة، قم بتحديث الصفحة لمحاكاة الجلسة الجديدة
+            if random.random() < 0.05:  # 5% فرصة للتحديث
+                driver.refresh()
+                logging.info(f"الجلسة {session_id}: تم تحديث الصفحة")
+                time.sleep(5)  # انتظر بعد التحديث
+            
     except Exception as e:
-        logging.error(f"حدث خطأ غير متوقع: {str(e)}")
+        logging.error(f"الجلسة {session_id}: حدث خطأ: {str(e)}")
+    finally:
+        driver.quit()
+        logging.info(f"الجلسة {session_id}: انتهت")
+
+# تشغيل المزرعة
+if __name__ == "__main__":
+    threads = []
+    for i in range(NUM_BROWSERS):
+        t = threading.Thread(target=automation_session, args=(i+1,))
+        t.daemon = True
+        t.start()
+        threads.append(t)
+        logging.info(f"تم بدء الجلسة {i+1}")
+        time.sleep(random.randint(10, 30))  # تأخير بين بدء الجلسات
+
+    # انتظر حتى انتهاء جميع الجلسات (في الواقع، ستعمل لفترة SESSION_DURATION)
+    for t in threads:
+        t.join()
